@@ -4,20 +4,20 @@ Full-stack email scheduling service built with Express, BullMQ, Redis, PostgreSQ
 
 ---
 
-## ✅ Feature Checklist
+## Feature Checklist
 
 ### Backend
 - [x] TypeScript — type safety across API, queue, and DB layers
 - [x] Express.js — REST API for scheduling, listing, and stats
-- [x] **BullMQ + Redis** — delayed job scheduling (zero cron, anywhere)
+- [x] BullMQ + Redis — delayed job scheduling (zero cron, anywhere)
 - [x] PostgreSQL + Prisma — durable source of truth with typed ORM
 - [x] Ethereal Email — real SMTP send flow with preview URLs
 - [x] Worker concurrency — configurable via `WORKER_CONCURRENCY` env
 - [x] Minimum delay between sends — `MIN_DELAY_MS` + BullMQ limiter
 - [x] Hourly rate limit — Redis-backed `INCR` counter, never in-memory
-- [x] Rate limit hit → reschedule to next hour, never drop
-- [x] **Idempotency** — `email.id` as BullMQ `jobId` + DB status check before send
-- [x] **Restart-safe** — rehydration on startup using DB as truth, BullMQ deduplicates
+- [x] Rate limit hit -> reschedule to next hour, never drop
+- [x] Idempotency — `email.id` as BullMQ `jobId` + DB status check before send
+- [x] Restart-safe — rehydration on startup using DB as truth, BullMQ deduplicates
 - [x] 1000+ emails — batch DB writes + async queue inserts, API responds immediately
 
 ### Frontend
@@ -29,63 +29,59 @@ Full-stack email scheduling service built with Express, BullMQ, Redis, PostgreSQ
 - [x] Loading skeletons + empty states throughout
 - [x] Stats cards — scheduled / sending / sent / failed counts
 - [x] Auto-refresh every 30 seconds
-- [x] Reusable components — `Header`, `ComposeModal`, `EmailTable`, `StatsCards`
+- [x] Reusable components — Header, ComposeModal, EmailTable, StatsCards
 - [x] Typed API client (`lib/api.ts`) and TypeScript props everywhere
 
 ---
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                     Next.js Frontend                     │
-│  Login → Google OAuth → Dashboard (Scheduled/Sent tabs) │
+│                     Next.js Frontend                    │
+│  Login -> Google OAuth -> Dashboard (Scheduled/Sent)    │
 └───────────────────────┬─────────────────────────────────┘
                         │ HTTP (credentials: include)
                         ▼
 ┌─────────────────────────────────────────────────────────┐
-│               Express.js API (Port 4000)                 │
+│               Express.js API (Port 4000)                │
 │  POST /api/emails/schedule                              │
 │  GET  /api/emails/scheduled                             │
 │  GET  /api/emails/sent                                  │
 │  GET  /api/emails/stats                                 │
-│  GET  /api/auth/google  ──► Google OAuth               │
-│  GET  /api/auth/callback ◄── Google OAuth              │
+│  GET  /api/auth/google  ──> Google OAuth                │
+│  GET  /api/auth/callback <-- Google OAuth               │
 │  GET  /api/auth/me                                      │
 │  POST /api/auth/logout                                  │
 └───────┬───────────────────────────────────────┬─────────┘
-        │ write rows                             │ read/update
-        ▼                                        ▼
+        │ write rows                            │ read/update
+        ▼                                       ▼
 ┌───────────────────┐              ┌─────────────────────────┐
-│   PostgreSQL DB   │              │      BullMQ Queue        │
-│   (Prisma ORM)    │◄─rehydrate──│  (Redis-backed, delayed) │
-│                   │             └───────────┬──────────────┘
-│  Email.status:    │                         │ delayed jobs
-│   SCHEDULED       │                         ▼
-│   SENDING         │             ┌─────────────────────────┐
-│   SENT            │             │     BullMQ Worker        │
-│   FAILED          │             │  1. Idempotency check    │
-│                   │◄────────────│  2. Rate limit (Redis)   │
-│  User (OAuth)     │             │  3. Status → SENDING     │
-└───────────────────┘             │  4. Ethereal SMTP send   │
-                                  │  5. Status → SENT/FAILED │
-                                  └─────────────────────────┘
+│   PostgreSQL DB   │              │      BullMQ Queue       │
+│   (Prisma ORM)    │<-rehydrate──-│  (Redis-backed, delay)  │
+│                   │              └───────────┬─────────────┘
+│  Email.status:    │                          │ delayed jobs
+│   SCHEDULED       │                          ▼
+│   SENDING         │              ┌─────────────────────────┐
+│   SENT            │              │     BullMQ Worker       │
+│   FAILED          │              │  1. Idempotency check   │
+│                   │<─────────────│  2. Rate limit (Redis)  │
+│  User (OAuth)     │              │  3. Status -> SENDING   │
+└───────────────────┘              │  4. Ethereal SMTP send  │
+                                   │  5. Status -> SENT/FAIL │
+                                   └─────────────────────────┘
 ```
 
 ### Scheduling (No Cron)
 Every email is scheduled via `emailQueue.add("send-email", { emailId }, { delay, jobId: emailId })`.
-- `delay` = `sendAt - now` in milliseconds
-- `jobId = emailId` = BullMQ's native deduplication key
+- `delay` is `sendAt - now` in milliseconds.
+- `jobId = emailId` serves as BullMQ's native deduplication key.
 
 ### Restart Persistence
-On every server startup, `rehydrateQueue()` queries all `SCHEDULED`/`SENDING` emails from the DB and re-enqueues them. Because `jobId = emailId`, BullMQ silently ignores any already-queued job. This guarantees:
-- No lost sends after restart
-- No duplicate sends, ever
+On every server startup, `rehydrateQueue()` queries all `SCHEDULED`/`SENDING` emails from the DB and re-enqueues them. Because `jobId = emailId`, BullMQ silently ignores any already-queued job. This guarantees no lost sends after restart and no duplicate sends.
 
 ### Idempotency Guard (Worker)
-Before every send, the worker checks `email.status === 'SENT'` and returns early if true. This handles edge cases like:
-- Worker crash mid-send + job retry
-- Manual re-enqueue bugs
+Before every send, the worker checks `email.status === 'SENT'` and returns early if true. This handles edge cases like a worker crash mid-send + job retry, or manual re-enqueue bugs.
 
 ### Rate Limiting
 ```
@@ -101,7 +97,7 @@ The schedule API batches DB writes in chunks of 100 (Prisma transactions) and en
 
 ---
 
-## 🚀 Setup & Running
+## Setup & Running
 
 ### Prerequisites
 - Docker Desktop
@@ -150,7 +146,7 @@ Edit `backend/.env`:
 | `MAX_EMAILS_PER_HOUR` | Hourly send cap per sender (default: 50) |
 | `WORKER_CONCURRENCY` | Parallel workers (default: 5) |
 | `MIN_DELAY_MS` | Min gap between sends in ms (default: 1000) |
-| `ETHEREAL_USER` / `ETHEREAL_PASS` | Leave blank → auto-generated at startup |
+| `ETHEREAL_USER` / `ETHEREAL_PASS` | Leave blank -> auto-generated at startup |
 
 ### 4. Run DB Migration
 
@@ -166,23 +162,12 @@ cd backend
 npm run dev
 ```
 
-On startup you'll see:
-```
-✅ Redis connected
-📧 Ethereal test account created:
-   User : xxxx@ethereal.email
-   Pass : xxxxxxxx
-🔧 BullMQ worker started (concurrency=5, minDelay=1000ms)
-🔄 Rehydrating BullMQ queue from database...
-🚀 ReachInbox Scheduler API running at http://localhost:4000
-```
-
-> **Save the Ethereal credentials** — paste them into your `.env` as `ETHEREAL_USER` and `ETHEREAL_PASS` to reuse the same inbox across restarts.
+On startup you will see output indicating that Redis has connected, Ethereal test credentials were created (save these to your .env to reuse them), the BullMQ worker has started, and the API is running at localhost:4000.
 
 ### 6. Configure Frontend
 
+The `frontend/.env.local` file already contains:
 ```bash
-# frontend/.env.local already contains:
 NEXT_PUBLIC_API_URL=http://localhost:4000
 ```
 
@@ -193,25 +178,25 @@ cd frontend
 npm run dev
 ```
 
-Visit: **http://localhost:3000**
+Visit **http://localhost:3000** in your browser.
 
 ---
 
-## 🔑 Google OAuth Setup
+## Google OAuth Setup
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com)
-2. Create or select a project
-3. Navigate to **APIs & Services → Credentials**
-4. Click **Create Credentials → OAuth 2.0 Client IDs**
-5. Application type: **Web application**
-6. Authorized redirect URIs: `http://localhost:4000/api/auth/callback`
-7. Copy the **Client ID** and **Client Secret** into `backend/.env`
+1. Go to Google Cloud Console.
+2. Create or select a project.
+3. Navigate to APIs & Services -> Credentials.
+4. Click Create Credentials -> OAuth 2.0 Client IDs.
+5. Application type: Web application.
+6. Authorized redirect URIs: `http://localhost:4000/api/auth/callback`.
+7. Copy the Client ID and Client Secret into `backend/.env`.
 
 ---
 
-## 📡 API Reference
+## API Reference
 
-### `POST /api/emails/schedule`
+### POST /api/emails/schedule
 Schedule a batch of emails.
 
 ```json
@@ -238,33 +223,33 @@ Response:
 }
 ```
 
-### `GET /api/emails/scheduled?page=1&limit=20`
+### GET /api/emails/scheduled?page=1&limit=20
 List emails with status `SCHEDULED` or `SENDING`.
 
-### `GET /api/emails/sent?page=1&limit=20`
+### GET /api/emails/sent?page=1&limit=20
 List emails with status `SENT` or `FAILED`.
 
-### `GET /api/emails/stats`
+### GET /api/emails/stats
 Returns counts: `{ scheduled, sending, sent, failed, total }`.
 
-### `DELETE /api/emails/:id`
+### DELETE /api/emails/:id
 Cancel a SCHEDULED email (removes from queue + DB).
 
-### `GET /api/auth/google`
+### GET /api/auth/google
 Redirect to Google OAuth.
 
-### `GET /api/auth/callback`
+### GET /api/auth/callback
 OAuth callback — sets session, redirects to frontend dashboard.
 
-### `GET /api/auth/me`
+### GET /api/auth/me
 Returns `{ id, email, name, avatar }` for the logged-in user.
 
-### `POST /api/auth/logout`
+### POST /api/auth/logout
 Destroys session.
 
 ---
 
-## 🔁 Demo: Restart Scenario
+## Demo: Restart Scenario
 
 To prove restart-safe behavior:
 
@@ -281,19 +266,18 @@ curl -X POST http://localhost:4000/api/emails/schedule \
 
 # 4. Restart the server
 npm run dev
-# You'll see: "Rehydrating 1 pending email(s)..."
+# You will see: "Rehydrating 1 pending email(s)..."
 
 # 5. Wait for the scheduled time — the email fires without duplicates
 ```
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
-```
+```text
 reachinbox-scheduler/
 ├── docker-compose.yml          # Postgres 16 + Redis 7
-│
 ├── backend/
 │   ├── prisma/
 │   │   └── schema.prisma       # Email + User models
@@ -318,7 +302,6 @@ reachinbox-scheduler/
 │   ├── .env.example
 │   ├── package.json
 │   └── tsconfig.json
-│
 ├── frontend/
 │   ├── app/
 │   │   ├── layout.tsx          # Root layout + SEO metadata
@@ -338,13 +321,12 @@ reachinbox-scheduler/
 │   ├── next.config.ts
 │   ├── tailwind.config.ts
 │   └── package.json
-│
 └── README.md
 ```
 
 ---
 
-## ⚙️ Environment Variables
+## Environment Variables
 
 ### Backend (`backend/.env`)
 
@@ -372,18 +354,12 @@ reachinbox-scheduler/
 
 ---
 
-## 🏛️ Trade-offs & Assumptions
+## Trade-offs & Assumptions
 
-1. **Single queue, multiple senders** — Rate limiting is per-sender (scoped by sender email + hour). A single burst from one sender won't block others.
-
-2. **Prisma over raw SQL** — Faster development, full type safety, and easy migration history. Trade-off: slight cold-start overhead.
-
-3. **SENDING status** — The worker sets `status = SENDING` before calling SMTP. If the process crashes mid-send, the row stays as SENDING. On restart, rehydration resets these to SCHEDULED and re-enqueues. The idempotency guard (`status === 'SENT'`) prevents double delivery even if the SMTP call succeeded before the crash.
-
-4. **No distributed lock for SENDING transition** — For a single-node deployment, the optimistic check is sufficient. For true multi-node production, a `SELECT FOR UPDATE` or Redis-based advisory lock would be needed.
-
-5. **Session stored in Redis** — Sessions survive backend restarts cleanly, and scale across multiple instances.
-
-6. **Batch stagger by `delayBetweenMs`** — Recipients in a batch get their `sendAt` staggered: `sendAt + (index × delayBetweenMs)`. This is a UX-visible delay, not just a worker-level throttle.
-
-7. **Ethereal Email** — A real SMTP flow (no mock), but emails only go to the Ethereal inbox. Preview URLs are stored in the DB and shown in the Sent table.
+1. Single queue, multiple senders — Rate limiting is per-sender (scoped by sender email + hour). A single burst from one sender won't block others.
+2. Prisma over raw SQL — Faster development, full type safety, and easy migration history. Trade-off: slight cold-start overhead.
+3. SENDING status — The worker sets `status = SENDING` before calling SMTP. If the process crashes mid-send, the row stays as SENDING. On restart, rehydration resets these to SCHEDULED and re-enqueues. The idempotency guard (`status === 'SENT'`) prevents double delivery even if the SMTP call succeeded before the crash.
+4. No distributed lock for SENDING transition — For a single-node deployment, the optimistic check is sufficient. For true multi-node production, a `SELECT FOR UPDATE` or Redis-based advisory lock would be needed.
+5. Session stored in Redis — Sessions survive backend restarts cleanly, and scale across multiple instances.
+6. Batch stagger by `delayBetweenMs` — Recipients in a batch get their `sendAt` staggered: `sendAt + (index * delayBetweenMs)`. This is a UX-visible delay, not just a worker-level throttle.
+7. Ethereal Email — A real SMTP flow (no mock), but emails only go to the Ethereal inbox. Preview URLs are stored in the DB and shown in the Sent table.
