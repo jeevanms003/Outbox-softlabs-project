@@ -79,8 +79,8 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
         body: form.body,
         sender: form.sender,
         sendAt: sendAt.toISOString(),
-        delayBetweenMs: form.delayBetweenMs,
-        hourlyLimit: form.hourlyLimit,
+        delayBetweenMs: Number(form.delayBetweenMs),
+        hourlyLimit: Number(form.hourlyLimit),
       };
 
       const res = await scheduleEmails(payload);
