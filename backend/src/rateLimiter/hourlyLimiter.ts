@@ -22,7 +22,14 @@ export interface RateLimitResult {
   msUntilReset: number;
 }
 
+export async function getSenderLimit(sender: string): Promise<number> {
+  const customLimit = await redisClient.get(`sender-limit:${sender}`);
+  if (customLimit) return parseInt(customLimit, 10);
+  return Number(process.env.MAX_EMAILS_PER_HOUR) || 50;
+}
+
 export async function checkAndIncrement(sender: string): Promise<RateLimitResult> {
+  const limit = await getSenderLimit(sender);
   const key = getKey(sender);
   const count = await redisClient.incr(key);
 
@@ -30,16 +37,16 @@ export async function checkAndIncrement(sender: string): Promise<RateLimitResult
     await redisClient.expire(key, 3600);
   }
 
-  const allowed = count <= MAX_PER_HOUR;
+  const allowed = count <= limit;
 
   if (!allowed) {
     await redisClient.decr(key);
     const resetMs = msUntilNextHour();
-    console.warn(`rate limit reached for ${sender} (${count - 1}/${MAX_PER_HOUR}), retry in ${Math.ceil(resetMs / 1000)}s`);
-    return { allowed: false, currentCount: MAX_PER_HOUR, limit: MAX_PER_HOUR, msUntilReset: resetMs };
+    console.warn(`rate limit reached for ${sender} (${count - 1}/${limit}), retry in ${Math.ceil(resetMs / 1000)}s`);
+    return { allowed: false, currentCount: limit, limit, msUntilReset: resetMs };
   }
 
-  return { allowed: true, currentCount: count, limit: MAX_PER_HOUR, msUntilReset: msUntilNextHour() };
+  return { allowed: true, currentCount: count, limit, msUntilReset: msUntilNextHour() };
 }
 
 export async function getCurrentCount(sender: string) {

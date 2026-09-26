@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 import prisma from "../db/client";
 import { emailQueue } from "../queue/queue";
 import { requireAuth } from "../middleware/auth.middleware";
+import { redisClient } from "../queue/redis";
 
 const router = Router();
 
@@ -33,6 +34,13 @@ router.post("/schedule", requireAuth, async (req: Request, res: Response) => {
   }
 
   const batchId = uuidv4();
+  
+  // Save the custom hourly limit for this sender in Redis
+  try {
+    await redisClient.set(`sender-limit:${data.sender}`, data.hourlyLimit);
+  } catch (err) {
+    console.error("failed to save sender limit:", err);
+  }
 
   try {
     const chunkSize = 100;
