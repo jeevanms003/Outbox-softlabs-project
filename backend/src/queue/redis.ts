@@ -2,9 +2,14 @@ import Redis from "ioredis";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
+const url = new URL(REDIS_URL);
 export const redisConnection = {
-  host: new URL(REDIS_URL).hostname,
-  port: Number(new URL(REDIS_URL).port) || 6379,
+  host: url.hostname,
+  port: Number(url.port) || 6379,
+  username: url.username || undefined,
+  password: url.password || undefined,
+  tls: url.protocol === "rediss:" ? {} : undefined,
+  maxRetriesPerRequest: null,
 };
 
 export const redisClient = new Redis(REDIS_URL, {

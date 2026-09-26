@@ -1,365 +1,127 @@
-# ReachInbox Email Job Scheduler
+# ReachInbox Email Scheduler / Outbox Softlabs Project
 
-Full-stack email scheduling service built with Express, BullMQ, Redis, PostgreSQL, and Next.js.
+## Table of Contents
+1. [Features Implemented](#features-implemented)
+2. [Architecture Overview](#architecture-overview)
+3. [Setup and Environment Variables](#setup-and-environment-variables)
+4. [How to Run with Docker (Recommended)](#how-to-run-with-docker-recommended)
+5. [How to Run Backend](#how-to-run-backend)
+6. [How to Run Frontend](#how-to-run-frontend)
 
----
-
-## Feature Checklist
+## Features Implemented
 
 ### Backend
-- [x] TypeScript — type safety across API, queue, and DB layers
-- [x] Express.js — REST API for scheduling, listing, and stats
-- [x] BullMQ + Redis — delayed job scheduling (zero cron, anywhere)
-- [x] PostgreSQL + Prisma — durable source of truth with typed ORM
-- [x] Ethereal Email — real SMTP send flow with preview URLs
-- [x] Worker concurrency — configurable via `WORKER_CONCURRENCY` env
-- [x] Minimum delay between sends — `MIN_DELAY_MS` + BullMQ limiter
-- [x] Hourly rate limit — Redis-backed `INCR` counter, never in-memory
-- [x] Rate limit hit -> reschedule to next hour, never drop
-- [x] Idempotency — `email.id` as BullMQ `jobId` + DB status check before send
-- [x] Restart-safe — rehydration on startup using DB as truth, BullMQ deduplicates
-- [x] 1000+ emails — batch DB writes + async queue inserts, API responds immediately
+* Scheduler: Manages and schedules email sending jobs using BullMQ.
+* Persistence: Ensures that jobs and states are preserved across restarts utilizing Redis and the database.
+* Rate Limiting: Controls the flow of incoming requests to prevent abuse.
+* Concurrency: Handles multiple email tasks concurrently through BullMQ workers.
 
 ### Frontend
-- [x] Google OAuth — real OAuth 2.0, not mocked
-- [x] Dashboard with Scheduled / Sent tabs
-- [x] Compose modal — subject, body, CSV upload, recipients count, start time, delay, hourly limit
-- [x] Scheduled emails table — recipient, subject, sender, scheduled time, status
-- [x] Sent emails table — recipient, subject, sender, sent time, status, Ethereal preview link
-- [x] Loading skeletons + empty states throughout
-- [x] Stats cards — scheduled / sending / sent / failed counts
-- [x] Auto-refresh every 30 seconds
-- [x] Reusable components — Header, ComposeModal, EmailTable, StatsCards
-- [x] Typed API client (`lib/api.ts`) and TypeScript props everywhere
-
----
+* Login: User authentication interface.
+* Dashboard: Central view for system metrics and quick actions.
+* Compose: Interface to create and schedule new email jobs.
+* Tables: Data grids to view past, pending, and scheduled jobs.
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     Next.js Frontend                    │
-│  Login -> Google OAuth -> Dashboard (Scheduled/Sent)    │
-└───────────────────────┬─────────────────────────────────┘
-                        │ HTTP (credentials: include)
-                        ▼
-┌─────────────────────────────────────────────────────────┐
-│               Express.js API (Port 4000)                │
-│  POST /api/emails/schedule                              │
-│  GET  /api/emails/scheduled                             │
-│  GET  /api/emails/sent                                  │
-│  GET  /api/emails/stats                                 │
-│  GET  /api/auth/google  ──> Google OAuth                │
-│  GET  /api/auth/callback <-- Google OAuth               │
-│  GET  /api/auth/me                                      │
-│  POST /api/auth/logout                                  │
-└───────┬───────────────────────────────────────┬─────────┘
-        │ write rows                            │ read/update
-        ▼                                       ▼
-┌───────────────────┐              ┌─────────────────────────┐
-│   PostgreSQL DB   │              │      BullMQ Queue       │
-│   (Prisma ORM)    │<-rehydrate──-│  (Redis-backed, delay)  │
-│                   │              └───────────┬─────────────┘
-│  Email.status:    │                          │ delayed jobs
-│   SCHEDULED       │                          ▼
-│   SENDING         │              ┌─────────────────────────┐
-│   SENT            │              │     BullMQ Worker       │
-│   FAILED          │              │  1. Idempotency check   │
-│                   │<─────────────│  2. Rate limit (Redis)  │
-│  User (OAuth)     │              │  3. Status -> SENDING   │
-└───────────────────┘              │  4. Ethereal SMTP send  │
-                                   │  5. Status -> SENT/FAIL │
-                                   └─────────────────────────┘
+### How Scheduling Works
+The application leverages BullMQ, a Redis-based queue for Node.js, to handle job scheduling. When a user composes an email and sets a scheduled time, a job is added to the BullMQ queue with a delay parameter. The worker process listens to this queue and processes the job only when the scheduled time arrives, sending the email via Ethereal Email.
+
+### How Persistence on Restart is Handled
+Persistence is primarily managed by Redis, which stores the queue state, and a relational database, which stores job metadata and application data. If the backend or worker process restarts, BullMQ will automatically resume processing jobs from the queue based on their state in Redis. The database serves as the source of truth for historical records and user data.
+
+### How Rate Limiting & Concurrency are Implemented
+* Rate Limiting: Incoming API requests are rate-limited using standard middleware to prevent overwhelming the server and ensure fair usage among users.
+* Concurrency: Concurrency is managed by the BullMQ worker configuration. The worker is set up to process a specific number of jobs concurrently. This ensures that the system can process multiple scheduled emails at once without blocking the main event loop, utilizing asynchronous Node.js features.
+
+## Setup and Environment Variables
+
+### Environment Variables
+You need to configure the environment variables for both the backend and the frontend.
+
+Backend (`backend/.env`):
+```env
+# Database connection string
+DATABASE_URL="your_database_url_here"
+
+# Redis connection
+REDIS_URL="redis://localhost:6379"
+REDIS_HOST="localhost"
+REDIS_PORT=6379
+
+# Ethereal Email Configuration
+ETHEREAL_USER="your_ethereal_user"
+ETHEREAL_PASS="your_ethereal_password"
+
+# Server Configuration
+PORT=3001
 ```
 
-### Scheduling (No Cron)
-Every email is scheduled via `emailQueue.add("send-email", { emailId }, { delay, jobId: emailId })`.
-- `delay` is `sendAt - now` in milliseconds.
-- `jobId = emailId` serves as BullMQ's native deduplication key.
-
-### Restart Persistence
-On every server startup, `rehydrateQueue()` queries all `SCHEDULED`/`SENDING` emails from the DB and re-enqueues them. Because `jobId = emailId`, BullMQ silently ignores any already-queued job. This guarantees no lost sends after restart and no duplicate sends.
-
-### Idempotency Guard (Worker)
-Before every send, the worker checks `email.status === 'SENT'` and returns early if true. This handles edge cases like a worker crash mid-send + job retry, or manual re-enqueue bugs.
-
-### Rate Limiting
-```
-Key:   rate:{sender}:{YYYY-MM-DD-HH}
-Op:    INCR (atomic) + EXPIRE 3600s (on count === 1)
-Safe:  Works across multiple workers — never in-memory
-Limit: MAX_EMAILS_PER_HOUR (env, default 50)
-Hit:   job.moveToDelayed(nextHour + 500ms) — never dropped
+Frontend (`frontend/.env.local`):
+```env
+NEXT_PUBLIC_API_URL="http://localhost:3001"
 ```
 
-### 1000+ Emails
-The schedule API batches DB writes in chunks of 100 (Prisma transactions) and enqueues jobs asynchronously. The HTTP response returns immediately after enqueuing — the worker spreads sends over time via the rate limiter and `delayBetweenMs` stagger.
+### How to set up Ethereal Email
+1. Go to ethereal.email.
+2. Click on "Create Ethereal Account".
+3. Copy the provided username and password.
+4. Paste them into your `backend/.env` file under `ETHEREAL_USER` and `ETHEREAL_PASS`.
 
----
+## How to Run with Docker (Recommended)
 
-## Setup & Running
+The easiest way to run the entire application (Backend, Frontend, Redis, and Database) is using Docker.
 
-### Prerequisites
-- Docker Desktop
-- Node.js 18+
-- A Google Cloud project with OAuth 2.0 credentials
+1. Ensure you have Docker and Docker Compose installed on your system.
+2. Make sure you have configured your environment variables in `backend/.env` and `frontend/.env.local` as described above.
+3. In the root directory of the project, run:
+   ```bash
+   docker compose up -d
+   ```
+4. This will automatically spin up:
+   * **Backend & Worker**: accessible at `http://localhost:3001`
+   * **Frontend**: accessible at `http://localhost:3000`
+   * **Redis & PostgreSQL**: running in the background for the backend.
 
-### 1. Clone & Install
+If you prefer to run the services manually without Docker, follow the steps below.
 
-```bash
-# Backend
-cd backend
-npm install
-npx prisma generate
+## How to Run Backend
 
-# Frontend
-cd ../frontend
-npm install
-```
+The backend consists of an Express API, a Database (accessed via Prisma), Redis, and a BullMQ worker.
 
-### 2. Start Infrastructure (Docker)
+1. Ensure Redis is running on your machine (or update your `REDIS_URL` or use `docker compose up -d`).
+2. Navigate to the backend directory:
+   ```bash
+   cd backend
+   ```
+3. Install dependencies:
+   ```bash
+   npm install
+   ```
+4. Set up the database schema:
+   ```bash
+   npx prisma generate
+   npx prisma db push
+   ```
+5. Start the backend server and worker:
+   ```bash
+   npm run dev
+   ```
 
-```bash
-# From project root
-docker compose up -d
-```
+## How to Run Frontend
 
-This starts PostgreSQL on port 5432 and Redis on port 6379.
+The frontend is a Next.js application.
 
-### 3. Configure Backend
-
-```bash
-cp backend/.env.example backend/.env
-```
-
-Edit `backend/.env`:
-
-| Variable | Description |
-|----------|-------------|
-| `DATABASE_URL` | PostgreSQL connection string (default works with Docker) |
-| `REDIS_URL` | Redis URL (default works with Docker) |
-| `GOOGLE_CLIENT_ID` | From Google Cloud Console |
-| `GOOGLE_CLIENT_SECRET` | From Google Cloud Console |
-| `GOOGLE_CALLBACK_URL` | Must be `http://localhost:4000/api/auth/callback` |
-| `SESSION_SECRET` | Any long random string |
-| `FRONTEND_URL` | `http://localhost:3000` |
-| `MAX_EMAILS_PER_HOUR` | Hourly send cap per sender (default: 50) |
-| `WORKER_CONCURRENCY` | Parallel workers (default: 5) |
-| `MIN_DELAY_MS` | Min gap between sends in ms (default: 1000) |
-| `ETHEREAL_USER` / `ETHEREAL_PASS` | Leave blank -> auto-generated at startup |
-
-### 4. Run DB Migration
-
-```bash
-cd backend
-npx prisma migrate dev --name init
-```
-
-### 5. Start Backend
-
-```bash
-cd backend
-npm run dev
-```
-
-On startup you will see output indicating that Redis has connected, Ethereal test credentials were created (save these to your .env to reuse them), the BullMQ worker has started, and the API is running at localhost:4000.
-
-### 6. Configure Frontend
-
-The `frontend/.env.local` file already contains:
-```bash
-NEXT_PUBLIC_API_URL=http://localhost:4000
-```
-
-### 7. Start Frontend
-
-```bash
-cd frontend
-npm run dev
-```
-
-Visit **http://localhost:3000** in your browser.
-
----
-
-## Google OAuth Setup
-
-1. Go to Google Cloud Console.
-2. Create or select a project.
-3. Navigate to APIs & Services -> Credentials.
-4. Click Create Credentials -> OAuth 2.0 Client IDs.
-5. Application type: Web application.
-6. Authorized redirect URIs: `http://localhost:4000/api/auth/callback`.
-7. Copy the Client ID and Client Secret into `backend/.env`.
-
----
-
-## API Reference
-
-### POST /api/emails/schedule
-Schedule a batch of emails.
-
-```json
-{
-  "recipients": ["alice@example.com", "bob@example.com"],
-  "subject": "Hello!",
-  "body": "This is your email body.",
-  "sender": "noreply@yourdomain.com",
-  "sendAt": "2025-01-15T10:00:00.000Z",
-  "delayBetweenMs": 1000,
-  "hourlyLimit": 50
-}
-```
-
-Response:
-```json
-{
-  "success": true,
-  "data": {
-    "batchId": "uuid-here",
-    "scheduled": 2,
-    "message": "2 email(s) scheduled successfully"
-  }
-}
-```
-
-### GET /api/emails/scheduled?page=1&limit=20
-List emails with status `SCHEDULED` or `SENDING`.
-
-### GET /api/emails/sent?page=1&limit=20
-List emails with status `SENT` or `FAILED`.
-
-### GET /api/emails/stats
-Returns counts: `{ scheduled, sending, sent, failed, total }`.
-
-### DELETE /api/emails/:id
-Cancel a SCHEDULED email (removes from queue + DB).
-
-### GET /api/auth/google
-Redirect to Google OAuth.
-
-### GET /api/auth/callback
-OAuth callback — sets session, redirects to frontend dashboard.
-
-### GET /api/auth/me
-Returns `{ id, email, name, avatar }` for the logged-in user.
-
-### POST /api/auth/logout
-Destroys session.
-
----
-
-## Demo: Restart Scenario
-
-To prove restart-safe behavior:
-
-```bash
-# 1. Start the server
-cd backend && npm run dev
-
-# 2. Schedule an email 5 minutes in the future via the dashboard or:
-curl -X POST http://localhost:4000/api/emails/schedule \
-  -H "Content-Type: application/json" \
-  -d '{"recipients":["test@test.com"],"subject":"Test","body":"Hello","sender":"me@example.com","sendAt":"<5 minutes from now as ISO>"}'
-
-# 3. Stop the server (Ctrl+C)
-
-# 4. Restart the server
-npm run dev
-# You will see: "Rehydrating 1 pending email(s)..."
-
-# 5. Wait for the scheduled time — the email fires without duplicates
-```
-
----
-
-## Project Structure
-
-```text
-reachinbox-scheduler/
-├── docker-compose.yml          # Postgres 16 + Redis 7
-├── backend/
-│   ├── prisma/
-│   │   └── schema.prisma       # Email + User models
-│   ├── src/
-│   │   ├── api/
-│   │   │   ├── auth.routes.ts  # Google OAuth + session routes
-│   │   │   └── email.routes.ts # Schedule / list / stats / cancel
-│   │   ├── db/
-│   │   │   └── client.ts       # Prisma singleton
-│   │   ├── mailer/
-│   │   │   └── ethereal.ts     # Ethereal SMTP transporter
-│   │   ├── middleware/
-│   │   │   └── auth.middleware.ts
-│   │   ├── queue/
-│   │   │   ├── queue.ts        # BullMQ Queue instance
-│   │   │   ├── redis.ts        # ioredis connection
-│   │   │   ├── worker.ts       # Send processor (idempotent + rate-limited)
-│   │   │   └── rehydrate.ts    # Startup re-queue from DB
-│   │   ├── rateLimiter/
-│   │   │   └── hourlyLimiter.ts # Redis INCR-based per-sender limiter
-│   │   └── index.ts            # Express app bootstrap
-│   ├── .env.example
-│   ├── package.json
-│   └── tsconfig.json
-├── frontend/
-│   ├── app/
-│   │   ├── layout.tsx          # Root layout + SEO metadata
-│   │   ├── globals.css         # Dark theme + animations
-│   │   ├── page.tsx            # Login page (Google OAuth)
-│   │   └── dashboard/
-│   │       └── page.tsx        # Main dashboard (protected)
-│   ├── components/
-│   │   ├── ComposeModal.tsx    # Email compose form + CSV upload
-│   │   ├── EmailTable.tsx      # Scheduled + Sent tables (shared)
-│   │   ├── Header.tsx          # Logo + user info + logout
-│   │   └── StatsCards.tsx      # Stats overview cards
-│   ├── lib/
-│   │   └── api.ts              # Typed fetch wrapper for all endpoints
-│   ├── types/
-│   │   └── email.ts            # Shared TypeScript types
-│   ├── next.config.ts
-│   ├── tailwind.config.ts
-│   └── package.json
-└── README.md
-```
-
----
-
-## Environment Variables
-
-### Backend (`backend/.env`)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | — | PostgreSQL connection string |
-| `REDIS_URL` | `redis://localhost:6379` | Redis URL |
-| `GOOGLE_CLIENT_ID` | — | Google OAuth client ID |
-| `GOOGLE_CLIENT_SECRET` | — | Google OAuth client secret |
-| `GOOGLE_CALLBACK_URL` | `http://localhost:4000/api/auth/callback` | OAuth redirect URI |
-| `SESSION_SECRET` | — | Express session secret |
-| `FRONTEND_URL` | `http://localhost:3000` | CORS + OAuth redirect target |
-| `ETHEREAL_USER` | auto | Ethereal SMTP user |
-| `ETHEREAL_PASS` | auto | Ethereal SMTP password |
-| `MAX_EMAILS_PER_HOUR` | `50` | Global hourly rate limit |
-| `WORKER_CONCURRENCY` | `5` | BullMQ worker concurrency |
-| `MIN_DELAY_MS` | `1000` | Minimum gap between sends (ms) |
-| `PORT` | `4000` | HTTP server port |
-
-### Frontend (`frontend/.env.local`)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NEXT_PUBLIC_API_URL` | `http://localhost:4000` | Backend API base URL |
-
----
-
-## Trade-offs & Assumptions
-
-1. Single queue, multiple senders — Rate limiting is per-sender (scoped by sender email + hour). A single burst from one sender won't block others.
-2. Prisma over raw SQL — Faster development, full type safety, and easy migration history. Trade-off: slight cold-start overhead.
-3. SENDING status — The worker sets `status = SENDING` before calling SMTP. If the process crashes mid-send, the row stays as SENDING. On restart, rehydration resets these to SCHEDULED and re-enqueues. The idempotency guard (`status === 'SENT'`) prevents double delivery even if the SMTP call succeeded before the crash.
-4. No distributed lock for SENDING transition — For a single-node deployment, the optimistic check is sufficient. For true multi-node production, a `SELECT FOR UPDATE` or Redis-based advisory lock would be needed.
-5. Session stored in Redis — Sessions survive backend restarts cleanly, and scale across multiple instances.
-6. Batch stagger by `delayBetweenMs` — Recipients in a batch get their `sendAt` staggered: `sendAt + (index * delayBetweenMs)`. This is a UX-visible delay, not just a worker-level throttle.
-7. Ethereal Email — A real SMTP flow (no mock), but emails only go to the Ethereal inbox. Preview URLs are stored in the DB and shown in the Sent table.
+1. Navigate to the frontend directory:
+   ```bash
+   cd frontend
+   ```
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Start the development server:
+   ```bash
+   npm run dev
+   ```
+4. Open your browser and navigate to `http://localhost:3000`.
